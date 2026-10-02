@@ -46,6 +46,7 @@ const ADDITIONAL: usize = 7;
 
 enum Action {
     SetMemorySlot(u8),
+    SetQuickSlot(u8),
     CycleBack,
     NoOp,
 }
@@ -134,18 +135,16 @@ fn get_dll_path() -> String {
 }
 
 fn config_key_to_action(key: &String) -> Action {
-    match key.strip_prefix("memory_slot_") {
-        Some(s) => {
-            let slot: u8 = s.parse().unwrap();
-            Action::SetMemorySlot(slot)
-        }
-        None => {
-            if key.contains("cycle") {
-                return Action::CycleBack;
-            };
-            Action::NoOp
-        }
+    if let Some(s) = key.strip_prefix("memory_slot_") {
+        return Action::SetMemorySlot(s.parse().unwrap());
     }
+    if let Some(s) = key.strip_prefix("quick_slot_") {
+        return Action::SetQuickSlot(s.parse().unwrap());
+    }
+    if key.contains("cycle") {
+        return Action::CycleBack;
+    }
+    Action::NoOp
 }
 
 fn read_config() -> HashMap<Shortcut, Action> {
@@ -177,6 +176,14 @@ fn set_memory_slot(game_data_man: &mut GameDataMan, slot_index: u8) {
     }
 
     equipped_magic.selected_slot = slot_index as i32;
+}
+
+fn set_quick_slot(game_data_man: &mut GameDataMan, slot_index: u8) {
+    let items = &mut game_data_man.main_player_game_data.equipment.equip_item_data;
+    if slot_index >= items.quick_slots.len() as u8 {
+        return;
+    }
+    items.selected_quick_slot = slot_index as i32;
 }
 
 fn back_cycle_memory_slot(game_data_man: &mut GameDataMan) {
@@ -269,29 +276,32 @@ pub unsafe extern "C" fn DllMain(_hmodule: u64, reason: u32) -> bool {
     std::thread::spawn(|| {
         wait_for_system_init(&Program::current(), Duration::MAX)
             .expect("Timeout waiting for system init");
-
+        
         let device_state = DeviceState::new();
         let config = read_config();
 
-        let mut last_cycle_back_run = Instant::now();
-        let cycle_back_rebound = Duration::from_millis(50);
+        let mut cycle_back_held = false;
 
         let mut last_hud_update_run = Instant::now();
         let hud_update_rebound = Duration::from_secs(3);
         let mut player_hud_type = None;
         let mut is_hud_restored = true;
 
+        
         let cs_task = unsafe { CSTaskImp::instance().unwrap() };
+
+
 
         cs_task.run_recurring(
             move |_: &FD4TaskData| {
                 let Some(main_player) = unsafe { WorldChrMan::instance() }
                     .ok()
-                    .and_then(|wcm| wcm.main_player.as_mut())
+                    .and_then(|wcm| wcm.main_player.as_ref())
                 else {
                     return
                 };
-                if main_player.chr_ins.module_container.data.hp <= 0 {
+
+                if main_player.chr_ins.modules.data.hp <= 0 {
                     return;
                 }
 
@@ -320,6 +330,14 @@ pub unsafe extern "C" fn DllMain(_hmodule: u64, reason: u32) -> bool {
 
                 let pressed_keys = device_state.get_keys();
 
+                let cycle_back_down = keybindings.iter().any(|(keys, action)| {
+                    matches!(action, Action::CycleBack)
+                        && is_all_keybinding_keys_pressed(keys, &pressed_keys)
+                });
+                if !cycle_back_down {
+                    cycle_back_held = false;
+                }
+
                 for (keybinds, action) in keybindings {
                     if !is_all_keybinding_keys_pressed(&keybinds, &pressed_keys) {
                         continue;
@@ -332,16 +350,24 @@ pub unsafe extern "C" fn DllMain(_hmodule: u64, reason: u32) -> bool {
 
                             set_memory_slot(get_game_data_man(), slot - 1);
                         }
+                        Action::SetQuickSlot(slot) => {
+                            get_game_data_man().game_settings.hud_type = HudType::On;
+                            last_hud_update_run = Instant::now();
+                            is_hud_restored = false;
+
+                            set_quick_slot(get_game_data_man(), slot - 1);
+                        }
                         Action::CycleBack => {
-                            if last_cycle_back_run.elapsed() < cycle_back_rebound {
-                                return;
+                            if cycle_back_held {
+                                break;
                             }
+                            cycle_back_held = true;
+
                             get_game_data_man().game_settings.hud_type = HudType::On;
                             last_hud_update_run = Instant::now();
                             is_hud_restored = false;
 
                             back_cycle_memory_slot(get_game_data_man());
-                            last_cycle_back_run = Instant::now();
                         }
                         Action::NoOp => {}
                     }
