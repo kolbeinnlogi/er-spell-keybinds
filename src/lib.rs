@@ -25,6 +25,11 @@ use windows::{
             GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
         },
+        UI::Input::KeyboardAndMouse::{
+            SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+            MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP,
+            MOUSEINPUT, VIRTUAL_KEY,
+        },
     },
 };
 
@@ -162,6 +167,180 @@ fn read_config() -> HashMap<Shortcut, Action> {
     config
 }
 
+
+fn ini_value(
+    config: &HashMap<String, HashMap<String, Option<String>>>,
+    section: &str,
+    key: &str,
+) -> Option<String> {
+    config.get(section)?.get(key)?.clone()
+}
+
+#[derive(Clone, Copy)]
+enum CastInput {
+    MouseLeft,
+    MouseRight,
+    Key(u16),
+}
+
+fn read_autocast() -> Option<CastInput> {
+    let config = ini!(&(get_dll_path() + "\\spell_keybinds.ini"));
+    let value = ini_value(&config, "keybinds", "auto_cast")?;
+    if value.eq_ignore_ascii_case("off") {
+        return None;
+    }
+    if value.eq_ignore_ascii_case("MouseLeft") {
+        return Some(CastInput::MouseLeft);
+    }
+    if value.eq_ignore_ascii_case("MouseRight") {
+        return Some(CastInput::MouseRight);
+    }
+    let upper = value.trim().to_ascii_uppercase();
+    let vk = match upper.as_str() {
+        "CTRL" | "CONTROL" | "LEFTCTRL" | "LEFTCONTROL" => 0xA2,
+        "RIGHTCTRL" | "RIGHTCONTROL" => 0xA3,
+        "SHIFT" | "LEFTSHIFT" => 0xA0,
+        "RIGHTSHIFT" => 0xA1,
+        "ALT" | "LEFTALT" => 0xA4,
+        "RIGHTALT" => 0xA5,
+        "TAB" => 0x09,
+        _ => use_key_vk(&value),
+    };
+    Some(CastInput::Key(vk))
+}
+
+fn hold_cast(input: CastInput, down: bool) {
+    match input {
+        CastInput::MouseLeft => mouse_button(true, down),
+        CastInput::MouseRight => mouse_button(false, down),
+        CastInput::Key(vk) => key_button(vk, down),
+    }
+}
+
+fn key_button(vk: u16, down: bool) {
+    let scan = unsafe {
+        windows::Win32::UI::Input::KeyboardAndMouse::MapVirtualKeyW(
+            vk as u32,
+            windows::Win32::UI::Input::KeyboardAndMouse::MAPVK_VK_TO_VSC,
+        ) as u16
+    };
+    let flags = if down {
+        windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_SCANCODE
+    } else {
+        windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_SCANCODE | KEYEVENTF_KEYUP
+    };
+    let mut input = INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(0),
+                wScan: scan,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    unsafe {
+        SendInput(std::slice::from_mut(&mut input), std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+fn mouse_button(left_button: bool, down: bool) {
+    let flags = match (left_button, down) {
+        (true, true) => MOUSEEVENTF_LEFTDOWN,
+        (true, false) => MOUSEEVENTF_LEFTUP,
+        (false, true) => MOUSEEVENTF_RIGHTDOWN,
+        (false, false) => MOUSEEVENTF_RIGHTUP,
+    };
+    let mut input = INPUT {
+        r#type: INPUT_MOUSE,
+        Anonymous: INPUT_0 {
+            mi: MOUSEINPUT {
+                dx: 0,
+                dy: 0,
+                mouseData: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: 0,
+            },
+        },
+    };
+    unsafe {
+        SendInput(std::slice::from_mut(&mut input), std::mem::size_of::<INPUT>() as i32);
+    }
+}
+
+fn use_key_vk(name: &str) -> u16 {
+    let upper = name.trim().to_ascii_uppercase();
+    match upper.as_str() {
+        "CTRL" | "CONTROL" | "LEFTCTRL" | "LEFTCONTROL" => return 0xA2,
+        "RIGHTCTRL" | "RIGHTCONTROL" => return 0xA3,
+        "SHIFT" | "LEFTSHIFT" => return 0xA0,
+        "RIGHTSHIFT" => return 0xA1,
+        "ALT" | "LEFTALT" => return 0xA4,
+        "RIGHTALT" => return 0xA5,
+        "TAB" => return 0x09,
+        _ => {}
+    }
+    if upper.len() == 1 {
+        let ch = upper.as_bytes()[0];
+        if ch.is_ascii_alphanumeric() {
+            return ch as u16;
+        }
+    }
+    if let Some(rest) = upper.strip_prefix('F') {
+        if let Ok(n) = rest.parse::<u16>() {
+            if (1..=24).contains(&n) {
+                return 0x6F + n;
+            }
+        }
+    }
+    0x52
+}
+
+fn read_autouse() -> Option<u16> {
+    let config = ini!(&(get_dll_path() + "\\spell_keybinds.ini"));
+    let Some(value) = ini_value(&config, "keybinds", "auto_use") else {
+        return None;
+    };
+    if value.eq_ignore_ascii_case("off") {
+        return None;
+    }
+    Some(use_key_vk(&value))
+}
+
+fn press_use_item(vk: u16) {
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(80));
+        let scan = unsafe {
+            windows::Win32::UI::Input::KeyboardAndMouse::MapVirtualKeyW(
+                vk as u32,
+                windows::Win32::UI::Input::KeyboardAndMouse::MAPVK_VK_TO_VSC,
+            ) as u16
+        };
+        let mut input = INPUT {
+            r#type: INPUT_KEYBOARD,
+            Anonymous: INPUT_0 {
+                ki: KEYBDINPUT {
+                    wVk: VIRTUAL_KEY(0),
+                    wScan: scan,
+                    dwFlags: windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_SCANCODE,
+                    time: 0,
+                    dwExtraInfo: 0,
+                },
+            },
+        };
+        unsafe {
+            SendInput(std::slice::from_mut(&mut input), std::mem::size_of::<INPUT>() as i32);
+            std::thread::sleep(Duration::from_millis(40));
+            input.Anonymous.ki.dwFlags = windows::Win32::UI::Input::KeyboardAndMouse::KEYEVENTF_SCANCODE
+                | KEYEVENTF_KEYUP;
+            SendInput(std::slice::from_mut(&mut input), std::mem::size_of::<INPUT>() as i32);
+        }
+    });
+}
+
 fn set_memory_slot(game_data_man: &mut GameDataMan, slot_index: u8) {
     let equipped_magic_ptr = game_data_man.main_player_game_data.equipment.equip_magic_data.as_ptr();
     let equipped_magic = unsafe { &mut *equipped_magic_ptr };
@@ -279,8 +458,13 @@ pub unsafe extern "C" fn DllMain(_hmodule: u64, reason: u32) -> bool {
         
         let device_state = DeviceState::new();
         let config = read_config();
+        let autocast = read_autocast();
+        let autouse_vk = read_autouse();
 
         let mut cycle_back_held = false;
+        let mut cast_held = false;
+        let mut cast_charging = false;
+        let mut quick_held = false;
 
         let mut last_hud_update_run = Instant::now();
         let hud_update_rebound = Duration::from_secs(3);
@@ -338,24 +522,63 @@ pub unsafe extern "C" fn DllMain(_hmodule: u64, reason: u32) -> bool {
                     cycle_back_held = false;
                 }
 
+                let cast_down = keybindings.iter().any(|(keys, action)| {
+                    matches!(action, Action::SetMemorySlot(_))
+                        && is_all_keybinding_keys_pressed(keys, &pressed_keys)
+                });
+                if !cast_down {
+                    if cast_charging {
+                        if let Some(input) = autocast {
+                            hold_cast(input, false);
+                        }
+                        cast_charging = false;
+                    }
+                    cast_held = false;
+                }
+
+                let quick_down = keybindings.iter().any(|(keys, action)| {
+                    matches!(action, Action::SetQuickSlot(_))
+                        && is_all_keybinding_keys_pressed(keys, &pressed_keys)
+                });
+                if !quick_down {
+                    quick_held = false;
+                }
+
                 for (keybinds, action) in keybindings {
                     if !is_all_keybinding_keys_pressed(&keybinds, &pressed_keys) {
                         continue;
                     }
                     match action {
                         Action::SetMemorySlot(slot) => {
+                            if cast_held {
+                                break;
+                            }
+                            cast_held = true;
+
                             get_game_data_man().game_settings.hud_type = HudType::On;
                             last_hud_update_run = Instant::now();
                             is_hud_restored = false;
 
                             set_memory_slot(get_game_data_man(), slot - 1);
+                            if let Some(input) = autocast {
+                                hold_cast(input, true);
+                                cast_charging = true;
+                            }
                         }
                         Action::SetQuickSlot(slot) => {
+                            if quick_held {
+                                break;
+                            }
+                            quick_held = true;
+
                             get_game_data_man().game_settings.hud_type = HudType::On;
                             last_hud_update_run = Instant::now();
                             is_hud_restored = false;
 
                             set_quick_slot(get_game_data_man(), slot - 1);
+                            if let Some(vk) = autouse_vk {
+                                press_use_item(vk);
+                            }
                         }
                         Action::CycleBack => {
                             if cycle_back_held {
