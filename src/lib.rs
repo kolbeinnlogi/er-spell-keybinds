@@ -183,9 +183,7 @@ enum CastInput {
     Key(u16),
 }
 
-fn read_autocast() -> Option<CastInput> {
-    let config = ini!(&(get_dll_path() + "\\spell_keybinds.ini"));
-    let value = ini_value(&config, "keybinds", "auto_cast")?;
+fn parse_cast_input(value: &str) -> Option<CastInput> {
     if value.eq_ignore_ascii_case("off") {
         return None;
     }
@@ -207,6 +205,27 @@ fn read_autocast() -> Option<CastInput> {
         _ => use_key_vk(&value),
     };
     Some(CastInput::Key(vk))
+}
+
+fn read_autocast() -> Option<CastInput> {
+    let config = ini!(&(get_dll_path() + "\\spell_keybinds.ini"));
+    let value = ini_value(&config, "keybinds", "auto_cast")?;
+    parse_cast_input(&value)
+}
+
+fn read_second_catalyst() -> Option<CastInput> {
+    let config = ini!(&(get_dll_path() + "\\spell_keybinds.ini"));
+    let value = ini_value(&config, "keybinds", "2nd_catalyst")?;
+    parse_cast_input(&value)
+}
+
+fn read_second_catalyst_slots() -> HashSet<u8> {
+    let config = ini!(&(get_dll_path() + "\\spell_keybinds.ini"));
+    ini_value(&config, "keybinds", "2nd_catalyst_slots")
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|part| part.trim().parse::<u8>().ok())
+        .collect()
 }
 
 fn hold_cast(input: CastInput, down: bool) {
@@ -459,11 +478,14 @@ pub unsafe extern "C" fn DllMain(_hmodule: u64, reason: u32) -> bool {
         let device_state = DeviceState::new();
         let config = read_config();
         let autocast = read_autocast();
+        let second_catalyst = read_second_catalyst();
+        let second_catalyst_slots = read_second_catalyst_slots();
         let autouse_vk = read_autouse();
 
         let mut cycle_back_held = false;
         let mut cast_held = false;
         let mut cast_charging = false;
+        let mut held_cast: Option<CastInput> = None;
         let mut quick_held = false;
 
         let mut last_hud_update_run = Instant::now();
@@ -528,9 +550,10 @@ pub unsafe extern "C" fn DllMain(_hmodule: u64, reason: u32) -> bool {
                 });
                 if !cast_down {
                     if cast_charging {
-                        if let Some(input) = autocast {
+                        if let Some(input) = held_cast {
                             hold_cast(input, false);
                         }
+                        held_cast = None;
                         cast_charging = false;
                     }
                     cast_held = false;
@@ -560,8 +583,14 @@ pub unsafe extern "C" fn DllMain(_hmodule: u64, reason: u32) -> bool {
                             is_hud_restored = false;
 
                             set_memory_slot(get_game_data_man(), slot - 1);
-                            if let Some(input) = autocast {
+                            let input = if second_catalyst.is_some() && second_catalyst_slots.contains(slot) {
+                                second_catalyst
+                            } else {
+                                autocast
+                            };
+                            if let Some(input) = input {
                                 hold_cast(input, true);
+                                held_cast = Some(input);
                                 cast_charging = true;
                             }
                         }
