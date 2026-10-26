@@ -361,44 +361,47 @@ fn press_use_item(vk: u16) {
 }
 
 fn set_memory_slot(game_data_man: &mut GameDataMan, slot_index: u8) {
-    let equipped_magic_ptr = game_data_man.main_player_game_data.equipment.equip_magic_data.as_ptr();
-    let equipped_magic = unsafe { &mut *equipped_magic_ptr };
+    unsafe {
+        let gdm = game_data_man as *mut GameDataMan as *const u8;
 
-    let last_slot = equipped_magic.entries.iter()
-        .filter(|e| e.param_id > 1)
-        .count() - 1;
+        // Correct chain from TGA table: +0x08 → +0x530 → +0x80
+        let p1 = *(gdm.add(0x08) as *const *mut u8);
+        if p1.is_null() || (p1 as usize) < 0x10000 { return; }
 
-    if slot_index > last_slot as u8 {
-        equipped_magic.selected_slot = last_slot as i32;
-        return;
+        let equip_magic_data = *(p1.add(0x530) as *const *mut u8);
+        if equip_magic_data.is_null() || (equip_magic_data as usize) < 0x10000 { return; }
+
+        // selected_slot is at +0x80
+        let target = slot_index.min(13);
+        *(equip_magic_data.add(0x80) as *mut i32) = target as i32;
     }
-
-    equipped_magic.selected_slot = slot_index as i32;
 }
 
 fn set_quick_slot(game_data_man: &mut GameDataMan, slot_index: u8) {
-    let items = &mut game_data_man.main_player_game_data.equipment.equip_item_data;
-    if slot_index >= items.quick_slots.len() as u8 {
-        return;
+    unsafe {
+        let gdm = game_data_man as *mut GameDataMan as *const u8;
+
+        // Chain from pointer scan: +0x8 → +0x5D8
+        let p1 = *(gdm.add(0x8) as *const *mut u8);
+        if p1.is_null() || (p1 as usize) < 0x10000 { return; }
+
+        let target = slot_index.min(9);
+        *(p1.add(0x5D8) as *mut i32) = target as i32;
     }
-    items.selected_quick_slot = slot_index as i32;
 }
 
 fn back_cycle_memory_slot(game_data_man: &mut GameDataMan) {
-    let equipped_magic_ptr = game_data_man.main_player_game_data.equipment.equip_magic_data.as_ptr();
-    let equipped_magic = unsafe { &mut *equipped_magic_ptr };
+    unsafe {
+        let gdm = game_data_man as *mut GameDataMan as *const u8;
+        let p1 = *(gdm.add(0x08) as *const *mut u8);
+        if p1.is_null() || (p1 as usize) < 0x10000 { return; }
+        let equip_magic_data = *(p1.add(0x530) as *const *mut u8);
+        if equip_magic_data.is_null() || (equip_magic_data as usize) < 0x10000 { return; }
 
-    let previous_slot = equipped_magic.selected_slot - 1;
-    let last_slot = equipped_magic.entries.iter()
-        .filter(|e| e.param_id > 1)
-        .count() - 1;
-
-    if previous_slot < 0 {
-        equipped_magic.selected_slot = last_slot as i32;
-        return;
+        let current = *(equip_magic_data.add(0x80) as *const i32);
+        let previous = if current <= 0 { 0 } else { current - 1 };
+        *(equip_magic_data.add(0x80) as *mut i32) = previous;
     }
-
-    equipped_magic.selected_slot = previous_slot;
 }
 
 fn cartesian_product(keycodes: Vec<HashSet<Keycode>>) -> Vec<HashSet<Keycode>> {
